@@ -1,0 +1,614 @@
+---
+title: "DESeq2_analysis"
+author: "Dibina Dinakaran"
+date: "2025-10-05"
+---
+---------------------------------------------------------------------------------------
+## Make sure the you are using latest version - R-4.5.1
+# Check working version by 
+version    #or
+R.version.string    #Download the latest version - https://cran.r-project.org/bin/windows/base/
+---------------------------------------------------------------------------------------
+
+# Understand this chunk to install any package
+```{r}
+getwd()
+#setwd("C:/Users/dibin/Downloads/")  # to have all results at this path
+
+install.packages("BiocManager")
+BiocManager::install(version = "devel")
+BiocManager::install("DESeq2")
+
+# install.packages("pak")   # in case nothing works
+# pak::pak("bioc::DESeq2")
+
+#Let's get started
+library(DESeq2)
+```
+
+
+## preparing counts and metadata
+```{r setup, include=FALSE}
+library("DESeq2")
+library("tidyverse")
+library(dplyr)
+library(tibble)
+
+raw_counts <- read.csv("C:/Users/dibin/Downloads/GSE106305_counts_matrix1.csv", header = TRUE, row.names = "Geneid", stringsAsFactors = FALSE)
+head(raw_counts)
+raw_counts <- raw_counts[,sort(colnames(raw_counts))]
+colSums(raw_counts)
+
+condition <- c(rep("LNCAP_Hypoxia", 2), rep("LNCAP_Normoxia", 2), rep("PC3_Hypoxia", 2), rep("PC3_Normoxia", 2))
+print(condition)
+
+my_colData <- as.data.frame(condition)
+rownames(my_colData) <- colnames(raw_counts)
+head(my_colData)
+```
+
+
+##  creating dds object
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = raw_counts,
+                              colData = my_colData,
+                              design = ~condition)
+dds
+head(counts(dds))
+dim(counts(dds))
+```
+
+```{r}
+count_matrix <- counts(dds)
+dim(count_matrix)
+zero_counts_per_gene <- rowSums(count_matrix == 0)
+count_matrix <- as.data.frame(count_matrix)
+zero_summary <- table(zero_counts_per_gene)
+print(zero_summary)
+```
+
+
+```{r}
+library(data.table)
+annotation_file <- "C:/Users/dibin/Downloads/GRCh38annotation.csv"
+annotation <- fread(annotation_file, stringsAsFactors = FALSE)
+counts_gse <- read.csv("C:/Users/dibin/Downloads/GSE106305_counts_matrix1.csv",
+                     header = TRUE,
+                     stringsAsFactors = FALSE)
+
+counts_gse$Geneid <- sub("\\..*$", "", counts_gse$Geneid)
+annotation$Geneid <- sub("\\..*$", "", annotation$Geneid)
+annotated_counts <- left_join(counts_gse, annotation, by = "Geneid") %>%
+  select(Geneid, Genesymbol, Genebiotype, 
+         LNCAP_Hypoxia_S1, LNCAP_Hypoxia_S2, LNCAP_Normoxia_S1, LNCAP_Normoxia_S2, 
+         PC3_Hypoxia_S1, PC3_Hypoxia_S2, PC3_Normoxia_S1, PC3_Normoxia_S2)
+```
+
+
+```{r}
+biotypes_to_keep <- c("protein_coding", "IG_J_gene", "IG_V_gene", "IG_C_gene", "IG_D_gene", "TR_D_gene", "TR_C_gene", "TR_V_gene", "TR_J_gene")
+
+filtered_counts <- annotated_counts %>%
+  filter(Genebiotype %in% biotypes_to_keep)
+
+filtered_counts$Geneid <- sub("\\..*$", "", filtered_counts$Geneid)
+head(filtered_counts, n = 3)
+
+output_file <- "biotype_count_matrix.csv"
+fwrite(filtered_counts, file = output_file, sep = ",", row.names = FALSE)
+zero_counts1 <- rowSums(filtered_counts[, 4:11] == 0)
+zero_summary2 <- table(zero_counts1)
+print(zero_summary2)
+
+############## filtering 2 steps
+keep_genes <- zero_counts1 < 7
+filtered_counts_nozero <- filtered_counts[keep_genes, ]
+cat("Number of genes after filtering (zeros in <7 samples):", nrow(filtered_counts_nozero), "\n")
+
+new_zero_counts <- rowSums(filtered_counts_nozero[, 4:11] == 0)
+cat("New zero counts distribution:\n")
+print(table(new_zero_counts))
+
+output_file <- "filtered_biotype_nozero_count_matrix.csv"
+fwrite(filtered_counts_nozero, file = output_file, sep = ",", row.names = FALSE)
+
+head(filtered_counts_nozero, n = 3)
+
+dds_filtered <- dds[rownames(dds) %in% filtered_counts_nozero$gene_id, ]
+cat("Dimensions of filtered DESeqDataSet:", dim(dds_filtered), "\n")
+
+removed_genes <- filtered_counts[!keep_genes, ]
+cat("Biotype distribution of removed genes:\n")
+print(table(removed_genes$Genebiotype))
+```
+```{r}
+print(colnames(filtered_counts))
+zero_counts <- rowSums(filtered_counts[, 4:11] == 0)
+zero_summary <- table(zero_counts)
+print(zero_summary)
+keep_genes <- zero_counts < 7
+filtered_counts_nozero <- filtered_counts[keep_genes, ]
+cat("Number of genes after filtering (zeros in <7 samples):", nrow(filtered_counts_nozero), "\n")
+
+new_zero_counts <- rowSums(filtered_counts_nozero[, 4:11] == 0)
+print(table(new_zero_counts))
+
+output_file <- "filtered_biotype_6.csv"
+fwrite(filtered_counts_nozero, file = output_file, sep = ",", row.names = FALSE)
+
+head(filtered_counts_nozero, n = 3)
+
+dds_filtered <- dds[rownames(dds) %in% filtered_counts_nozero$Geneid, ]
+```
+
+```{r}
+biotype_counts <- filtered_counts_nozero %>%
+  count(Genebiotype) %>%
+  mutate(Proportion = n / sum(n),
+         Percentage = Proportion * 100) %>%
+  rename(Biotype = Genebiotype)  # Rename for clarity in plot
+print(biotype_counts)
+
+p <- ggplot(biotype_counts, aes(x = reorder(Biotype, -Proportion), y = Proportion, fill = Biotype)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Proportion of Genes by Biotype",
+       x = "Gene Biotypes",
+       y = "Proportion") +
+  scale_y_continuous(labels = scales::percent_format(scale = 100)) +  # Show proportions as percentages
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),  # Rotate x-axis labels
+        legend.position = "none") +  # Remove legend if biotypes are clear
+  scale_fill_brewer(palette = "Set2")  # Use distinct colors
+p
+output_plot <- "genebiotype_proportions1.png"
+ggsave(output_plot, plot = p, width = 8, height = 6, dpi = 300)
+```
+
+
+
+```{r}
+vsd <- vst(dds_filtered, blind = TRUE)  # blind=TRUE for exploratory PCA
+plot_PCA = function (vsd.obj) {
+  pcaData <- plotPCA(vsd.obj,  intgroup = c("condition"), returnData = T)
+  percentVar <- round(100 * attr(pcaData, "percentVar"))
+  ggplot(pcaData, aes(PC1, PC2, color=condition)) +
+    geom_point(size=3) +
+    labs(x = paste0("PC1: ",percentVar[1],"% variance"),
+         y = paste0("PC2: ",percentVar[2],"% variance"),
+         title = "PCA Plot colored by condition") +
+    ggrepel::geom_text_repel(aes(label = name), color = "black")
+}
+
+png(filename = "pcab.png", 
+    width = 2000, height = 2000, res = 300)  # adjust width/height as needed
+plot_PCA(vsd)
+dev.off()
+```
+
+
+```{r}
+dds <- DESeq(dds_filtered)
+dds
+normalized_counts <- counts(dds, normalized = T)
+normalized_counts_df <- as.data.frame(normalized_counts)
+write.csv(normalized_counts_df, file = "normalized_counts.csv", row.names = TRUE)
+```
+
+
+```{r}
+vsd <- vst(dds, blind = TRUE)  # blind=TRUE for exploratory PCA
+plot_PCA = function (vsd.obj) {
+  pcaData <- plotPCA(vsd.obj,  intgroup = c("condition"), returnData = T)
+  percentVar <- round(100 * attr(pcaData, "percentVar"))
+  ggplot(pcaData, aes(PC1, PC2, color=condition)) +
+    geom_point(size=3) +
+    labs(x = paste0("PC1: ",percentVar[1],"% variance"),
+         y = paste0("PC2: ",percentVar[2],"% variance"),
+         title = "PCA Plot colored by condition") +
+    ggrepel::geom_text_repel(aes(label = name), color = "black")
+}
+
+png(filename = "pcaa.png", 
+    width = 2000, height = 2000, res = 300)  # adjust width/height as needed
+plot_PCA(vsd)
+dev.off()
+
+
+vsd <- vst(dds, blind = TRUE)
+plotDists = function (vsd.obj) {
+  sampleDists <- dist(t(assay(vsd.obj)))
+  sampleDistMatrix <- as.matrix(sampleDists)
+  rownames(sampleDistMatrix) <- paste(vsd.obj$condition)
+  colors <- colorRampPalette(rev(RColorBrewer::brewer.pal(9, "Blues")))(55)
+  pheatmap::pheatmap(sampleDistMatrix, clustering_distance_rows = sampleDists,  clustering_distance_cols = sampleDists, col = colors, fontsize_row = 4, fontsize_col = 4, fontsize_legend = 4, fontsize = 4)
+}
+png(filename = "sampleheatmap1.png", width = 1000, height = 900, res = 300)  # adjust width/height as needed
+plotDists(vsd)
+dev.off()
+
+variable_gene_heatmap <- function (vsd.obj, num_genes = 500, annotation, title = "") {
+  brewer_palette <- "RdBu"
+  ramp <- colorRampPalette( RColorBrewer::brewer.pal(11, brewer_palette))
+  mr <- ramp(256)[256:1]
+  stabilized_counts <- assay(vsd.obj)
+  row_variances <- rowVars(stabilized_counts)
+  top_variable_genes <- stabilized_counts[order(row_variances, decreasing=T)[1:num_genes],]
+  top_variable_genes <- top_variable_genes - rowMeans(top_variable_genes, na.rm=T)
+  gene_names <- annotation$Gene.name[match(rownames(top_variable_genes), annotation$Gene.stable.ID)]
+  rownames(top_variable_genes) <- gene_names
+  coldata <- as.data.frame(vsd.obj@colData)
+  coldata$sizeFactor <- NULL
+  pheatmap::pheatmap(top_variable_genes, color = mr, annotation_col = coldata, fontsize_col = 8, fontsize_row = 250/num_genes, border_color = NA, main = title)
+}
+
+png(filename = "variable_gene_heatmap.png", 
+    width = 1000, height = 1000, res = 300)  # adjust width/height as needed
+variable_gene_heatmap(vsd, num_genes = 40, annotation = annotation)
+dev.off()
+
+dim(dds)
+```
+
+```{r}
+dds_lncap <- dds[, grepl("LNCAP", colnames(dds))]
+dds_lncap
+dds_lncap$condition <- droplevels(dds_lncap$condition)
+dds_lncap$condition <- relevel(dds_lncap$condition, ref = "LNCAP_Normoxia")
+dds_lncap <- DESeq(dds_lncap)
+
+res_lncap <- results(dds_lncap, contrast = c("condition", "LNCAP_Hypoxia", "LNCAP_Normoxia"))
+res_lncap
+summary(res_lncap)
+res0.01 <- results(dds, alpha = 0.5)
+summary(res0.01)
+reslncapOrdered <- res_lncap[order(res_lncap$padj), ]
+sum(reslncapOrdered$padj < 0.05, na.rm = TRUE)
+reslncapOrdered <- res_lncap[order(res_lncap$padj), ]
+head(reslncapOrdered)
+summary(reslncapOrdered)
+write.csv(as.data.frame(reslncapOrdered), file = "DEGs_lncap.csv")
+```
+
+
+```{r}
+plotMA(res_lncap)
+```
+
+
+```{r}
+res_df <- as.data.frame(reslncapOrdered)
+res_df <- na.omit(res_df)
+res_df$gene <- rownames(res_df)
+
+res_df$regulation <- "Not Significant"
+res_df$regulation[res_df$padj < 0.05 & res_df$log2FoldChange > 1] <- "Upregulated"
+res_df$regulation[res_df$padj < 0.05 & res_df$log2FoldChange < -1] <- "Downregulated"
+
+qp <- ggplot(res_df, aes(x = log2FoldChange, y = -log10(padj), color = regulation)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("Upregulated" = "#FEA405", 
+                                "Downregulated" = "purple", 
+                                "Not Significant" = "gray")) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +
+  annotate("text", x = min(res_df$log2FoldChange), y = -log2(0.05) + 0.5,
+           label = "padj = 0.05", hjust = 0, size = 3) +
+  theme_minimal() +
+  labs(title = "Volcano Plot", 
+       x = "Log2 Fold Change", 
+       y = "-Log10 Adjusted P-Value") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+v_plot <- "vp_lncap.png"
+ggsave(v_plot, plot = qp, width = 8, height = 6, dpi = 300)
+```
+
+# not to be used
+```{r}
+library(pheatmap)
+library(RColorBrewer)
+library(DESeq2)
+library(dplyr)
+
+DE_gene_heatmap <- function(res, count_matrix, padj_cutoff = 0.0001, ngenes = 20) {
+  # Generate the color palette
+  brewer_palette <- "RdBu"
+  ramp <- colorRampPalette(RColorBrewer::brewer.pal(11, brewer_palette))
+  mr <- ramp(256)[256:1]  # Reversed palette (blue to red)
+
+  # Convert DESeqResults to data frame and get significant genes
+  significant_genes <- as.data.frame(res) %>%
+    filter(padj < padj_cutoff) %>%
+    arrange(desc(log2FoldChange)) %>%
+    head(ngenes)
+
+  # Extract count data for significant genes
+  heatmap_values <- count_matrix[rownames(significant_genes), ]  # Use row names (Ensembl IDs)
+  
+  # Add gene symbols as row names (assuming res has gene_symbol; adjust if needed)
+  if ("gene_symbol" %in% colnames(res)) {
+    rownames(heatmap_values) <- res[rownames(significant_genes), "gene_symbol"]
+  } else {
+    rownames(heatmap_values) <- rownames(significant_genes)  # Use Ensembl IDs if no symbols
+  }
+
+  # Scale rows for heatmap (z-score normalization)
+  heatmap_values <- t(scale(t(heatmap_values)))
+
+  # Plot the heatmap using pheatmap
+  p <- pheatmap::pheatmap(heatmap_values,
+                          color = mr,
+                          scale = "none",  # Already scaled
+                          cluster_rows = TRUE,
+                          cluster_cols = TRUE,
+                          fontsize_col = 10,
+                          fontsize_row = max(6, 200/ngenes),  # Minimum font size of 6
+                          border_color = NA,
+                          main = paste("Top", ngenes, "DE Genes (padj <", padj_cutoff, ")"))
+
+  # Return the pheatmap object
+  return(invisible(p))
+}
+
+count_matrix <- assay(dds)  # Replace with your count matrix if different
+png("C:/Users/dibin/Downloads/de_gene_heatmap.png",
+    width = 800, height = 600, res = 150)  # Adjust dimensions and resolution
+d <- DE_gene_heatmap(res_lncap, count_matrix, padj_cutoff = 0.001, ngenes = 30)
+dev.off()
+```
+
+
+
+```{r}
+
+raw_counts <- assay(dds)
+vst_counts <- assay(vsd)
+
+png("density_plots_raw_vst.png",
+    width = 4000, height = 4000, res = 300)  # Adjust width, height (pixels), and resolution (dpi)
+
+par(mfrow = c(4, 4), mar = c(3, 3, 2, 1))  # mar adjusts margins (bottom, left, top, right)
+
+for (i in 1:8) {
+  # Raw counts density
+  plot(density(raw_counts[, i]),
+       main = paste("Raw - Sample", colnames(raw_counts)[i]),
+       xlab = "Expression",
+       col = "red",
+       lwd = 2,
+       ylim = c(0, max(sapply(1:8, function(j) max(density(raw_counts[, j])$y, na.rm = TRUE))))  # Uniform y-axis
+       )
+  
+  # VST counts density (next panel)
+  plot(density(vst_counts[, i]),
+       main = paste("VST - Sample", colnames(vst_counts)[i]),
+       xlab = "Expression",
+       col = "blue",
+       lwd = 2,
+       ylim = c(0, max(sapply(1:8, function(j) max(density(vst_counts[, j])$y, na.rm = TRUE))))  # Uniform y-axis
+       )
+}
+dev.off()
+```
+
+
+```{r}
+res_lncap <- read.csv("DEGs_lncap.csv", row.names = 1)
+head(res_lncap)
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(dplyr)
+library(stats)
+
+ncbi_list <- clusterProfiler::bitr(
+  geneID = rownames(res_lncap),        # use Ensembl IDs from row names
+  fromType = "ENSEMBL",          
+  toType = "ENTREZID", 
+  OrgDb = org.Hs.eg.db
+)
+
+res_lncap$ENSEMBL <- rownames(res_lncap)
+
+res_mapped <- res_lncap %>%
+  left_join(ncbi_list, by = "ENSEMBL") %>%
+  filter(!is.na(ENTREZID)) %>%
+  distinct(ENTREZID, .keep_all = TRUE)
+
+ngenes <- res_mapped$log2FoldChange
+names(ngenes) <- res_mapped$ENTREZID
+ngenes <- sort(ngenes, decreasing = TRUE)
+
+library(ReactomePA)
+enp_gsea <- gsePathway(
+  ngenes,
+  organism = "human",
+  #pvalueCutoff = 0.05,
+  verbose = FALSE
+)
+
+head(enp_gsea@result)
+# enp_gsea2 <- gsePathway(
+#   ngenes,
+#   organism = "human",
+#   pvalueCutoff = 0.05,
+#   pAdjustMethod = "BH",
+#   minGSSize = 10,  
+#   maxGSSize = 500, 
+#   verbose = FALSE
+# )
+```
+
+```{r}
+#enp_gsea <- clusterProfiler::setReadable(enp_gsea, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+
+pathways <- enp_gsea@result
+pathways <- pathways[order(pathways$p.adjust), ]  # Sort by FDR (adjusted p-value)
+top_pathways <- pathways[order(abs(pathways$NES), decreasing = TRUE), ]  # Sort by NES
+
+library(dplyr)
+library(forcats)
+
+top20 <- top_pathways[1:20, ] %>%
+  mutate(Description = fct_reorder(Description, NES))  # Reorder factor for y-axis
+
+#write.csv(top20, "top20_pathways.csv", row.names = FALSE)
+
+```
+
+```{r}
+library(ggplot2)
+
+r1 <- ggplot(top20, aes(x = NES,
+                        y = Description,
+                        color = p.adjust,
+                        size = setSize)) +
+  geom_point(alpha = 0.9) +
+  scale_color_gradient(low = "#0072B2", high = "#D55E00", name = "FDR (p.adjust)") +
+  scale_size(range = c(3, 10), name = "Gene Set Size") +
+  labs(
+    title = "Top 10 Enriched Pathways",
+    subtitle = "Gene Set Enrichment Analysis (GSEA)",
+    x = "Normalized Enrichment Score (NES)",
+    y = NULL,
+    caption = "Data source: clusterProfiler::gsePathway"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.y = element_text(size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 13),
+    legend.position = "right"
+  )
+
+r1
+```
+
+
+```{r}
+library(ReactomePA)
+sig_genes <- res_mapped %>%
+  filter(padj < 0.1, abs(log2FoldChange) > 0.5) %>%
+  pull(ENTREZID)
+enr <- enrichPathway(gene = sig_genes, organism = "human", pvalueCutoff = 0.1)
+dotplot(enr, showCategory=20)
+```
+
+
+```{r}
+plot_counts <- function (dds, gene, normalization = "DESeq2"){
+  annotation <- read.csv("GRCh38annotation.csv", header = T, stringsAsFactors = F)
+  if (normalization == "cpm") {
+    normalized_data <- cpm(counts(dds, normalized = F)) 
+  } else if (normalization == "DESeq2")
+    normalized_data <- counts(dds, normalized = T) 
+  condition <- dds@colData$condition
+  if (is.numeric(gene)) { 
+    if (gene%%1==0 )
+      ensembl_id <- rownames(normalized_data)[gene]
+    else
+      stop("Invalid index supplied.")
+  } else if (gene %in% annotation$Genesymbol){ 
+    ensembl_id <- annotation$Geneid[which(annotation$Genesymbol == gene)]
+  } else if (gene %in% annotation$Geneid){
+    ensembl_id <- gene
+  } else {
+    stop("Gene not found. Check spelling.")
+  }
+  expression <- normalized_data[ensembl_id,]
+  gene_name <- annotation$Genesymbol[which(annotation$Geneid == ensembl_id)]
+  gene_tib <- tibble(condition = condition, expression = expression)
+  ggplot(gene_tib, aes(x = condition, y = expression))+
+    geom_boxplot(outlier.size = NULL)+
+    geom_point()+
+    labs (title = paste0("Expression of ", gene_name, " - ", ensembl_id), x = "group", y = paste0("Normalized expression (", normalization , ")"))+
+    theme(axis.text.x = element_text(size = 11), axis.text.y = element_text(size = 11))
+}
+
+plot_counts(dds, "IGFBP1")
+```
+
+
+```{r}
+library(fgsea)
+hallmark_pathway <- gmtPathways("h.all.v7.0.symbols.gmt.txt")
+head(names(hallmark_pathway))
+head(hallmark_pathway$HALLMARK_HYPOXIA, 20)
+lncap_ranked_list <- read.table("lncaprank.rnk", header = T, stringsAsFactors = F)
+head(lncap_ranked_list)
+prepare_ranked_list <- function(ranked_list) { 
+  if( sum(duplicated(ranked_list$Gene.name)) > 0) {
+    ranked_list <- aggregate(.~Gene.name, FUN = mean, data = ranked_list)
+    ranked_list <- ranked_list[order(ranked_list$log2FoldChange, decreasing = T),]
+  }
+  ranked_list <- na.omit(ranked_list)
+  ranked_list <- tibble::deframe(ranked_list)
+  ranked_list
+}
+
+lncap_ranked_list <- prepare_ranked_list(lncap_ranked_list)
+head(lncap_ranked_list)
+```
+
+
+```{r}
+prepare_ranked_list <- function(ranked_list) {
+  if (is.vector(ranked_list) && !is.list(ranked_list)) {
+    return(ranked_list)  # Return as-is if already processed
+  }
+
+  if (!is.data.frame(ranked_list)) {
+    stop("Input 'ranked_list' must be a data frame with 'Gene.name' and 'log2FoldChange' columns.")
+  }
+  if (sum(duplicated(ranked_list$Gene.name)) > 0) {
+    ranked_list <- aggregate(. ~ Gene.name, data = ranked_list, FUN = mean)
+    ranked_list <- ranked_list[order(ranked_list$log2FoldChange, decreasing = TRUE), ]
+  }
+
+  ranked_list <- na.omit(ranked_list)
+  ranked_list <- tibble::deframe(ranked_list[, c("Gene.name", "log2FoldChange")])
+
+  return(ranked_list)
+}
+
+if (!exists("lncap_ranked_list")) {
+  # Example: Convert res_lncap to a ranked list data frame
+  lncap_ranked_list <- as.data.frame(res_lncap) %>%
+    dplyr::select(Gene.name = gene_symbol, log2FoldChange)  # Adjust column names as needed
+}
+
+lncap_ranked_list <- prepare_ranked_list(lncap_ranked_list)
+print(head(lncap_ranked_list))
+```
+```{r}
+fgsea_results <- fgsea(pathways = hallmark_pathway,
+                  stats = lncap_ranked_list,
+                  minSize = 15,
+                  maxSize = 500,
+                  nperm= 1000)
+fgsea_results_ordered <- fgsea_results[order(-NES)]
+head(fgsea_results_ordered[, .(pathway, padj, NES)])
+
+# png("fgsea_plot.png",
+#     width = 800, height = 600, res = 150)
+# plotEnrichment(hallmark_pathway[[1]], lncap_ranked_list) + ggtitle(names(hallmark_pathway)[1])
+# #plotEnrichment(hallmark_pathway, "HALLMARK_GLYCOLYSIS" , lncap_ranked_list)
+# dev.off()
+```
+
+
+```{r}
+waterfall_plot <- function (fsgea_results, graph_title) {
+  fgsea_results %>% 
+    mutate(short_name = str_split_fixed(pathway, "_",2)[,2])%>% # removes 'HALLMARK_' from the pathway title 
+    ggplot( aes(reorder(short_name,NES), NES)) +
+      geom_bar(stat= "identity", aes(fill = padj<0.05))+
+      coord_flip()+
+      labs(x = "Hallmark Pathway", y = "Normalized Enrichment Score", title = graph_title)+
+      theme(axis.text.y = element_text(size = 7), 
+            plot.title = element_text(hjust = 1))
+}
+library(stringr)
+waterfall_plot(fgsea_results, "Hallmark pathways altered by hypoxia in LNCaP cells")
+```
+
